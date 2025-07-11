@@ -11,3 +11,12 @@ response:
   "agent_name": "deep-research-exploration",
   "agent_id": "asst_Pi20HEtImzvqmeX3uwpxf9Wz"
 }
+
+
+
+http://0.0.0.0:8000/chat_deep_research_agent
+
+{"question": "Describe an approach for frontier exploration of unconventional hydrocarbon opportunities", 
+"agent_id": "",
+"thread_id": ""
+}
