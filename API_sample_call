@@ -1,0 +1,13 @@
+http://0.0.0.0:8000/create_deep_research_agent
+
+{"agent_name": "deep-research-exploration", 
+"instructions": "You are an Agent that assists that helping user to do deep research based on the topic user provided. Ask clarification question is preferred if need more detail before you did the research.  Please always include the reference. "
+}
+
+response:
+
+{
+  "status": "success",
+  "agent_name": "deep-research-exploration",
+  "agent_id": "asst_Pi20HEtImzvqmeX3uwpxf9Wz"
+}
