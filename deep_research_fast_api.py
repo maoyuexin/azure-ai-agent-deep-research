@@ -18,7 +18,25 @@ from azure.ai.projects import AIProjectClient
 from azure.identity import DefaultAzureCredential
 from azure.ai.agents import AgentsClient
 from azure.ai.agents.models import DeepResearchTool, MessageRole, ThreadMessage,  ListSortOrder
- 
+from azure.storage.blob import BlobServiceClient
+
+
+def upload_blob_file(container_name, file_name, connection_string):
+
+    blob_service = BlobServiceClient.from_connection_string(connection_string)
+    container_client = blob_service.get_container_client(container=container_name)
+    try:
+        with open(file=file_name, mode="rb") as data:
+            container_client.upload_blob(name=file_name, data=data, overwrite=True)
+        return {
+            "status": "success",
+            "message": f"File {file_name} uploaded to container {container_name} successfully."
+        }
+    except Exception as e:
+        return {
+            "status": "failed",
+            "message": f"Failed to upload {file_name} to {container_name}: {str(e)}"
+        }
 
 def fetch_and_print_new_agent_response(
     thread_id: str,
@@ -143,10 +161,15 @@ async def chat_deep_research_agent(request: ChatRequest) -> ChatResponse:
                 )
                 print(final_message)
                 if final_message:
-                    create_research_summary(final_message, f"report/research_report_{thread_id}.md")
-        
-            
-        return ChatResponse(content="\n\n".join([t.text.value.strip() for t in final_message.text_messages]), chatHistory=[], thread_id=thread_id, followupQuestions=None)
+                    file_path = f"report/research_report_{thread_id}.md"
+                    create_research_summary(final_message, file_path)
+                    # Upload the research report to Azure Blob Storage 
+                    upload_result = upload_blob_file(container_name= os.environ.get("AZURE_STORAGE_ACCOUNT_CONTAINER_NAME"), file_name = file_path, connection_string= f"DefaultEndpointsProtocol=https;AccountName={os.environ.get('AZURE_STORAGE_ACCOUNT_NAME')};AccountKey={os.environ.get('AZURE_STORAGE_ACCOUNT_KEY')};EndpointSuffix=core.windows.net")
+                    report_blob_path = None
+                    if upload_result["status"] == "success":
+                        report_blob_path = f"https://{os.environ.get('AZURE_STORAGE_ACCOUNT_NAME')}.blob.core.windows.net/{os.environ.get('AZURE_STORAGE_ACCOUNT_CONTAINER_NAME')}/{file_path}"    
+                    
+        return ChatResponse(content="\n\n".join([t.text.value.strip() for t in final_message.text_messages]),  thread_id=thread_id, report_blob_path = report_blob_path)
 
     except Exception as e:
             raise HTTPException(status_code=422, detail=str(e))
