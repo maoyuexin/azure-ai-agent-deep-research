@@ -10,9 +10,8 @@ from models import *
 import asyncio
 from typing import Annotated
  
-
  
-import os, time
+import os, time,re
 from typing import Optional
 from azure.ai.projects import AIProjectClient
 from azure.identity import DefaultAzureCredential
@@ -38,11 +37,52 @@ def upload_blob_file(container_name, file_name, connection_string):
             "message": f"Failed to upload {file_name} to {container_name}: {str(e)}"
         }
 
+
+def convert_citations_to_superscript(markdown_content):
+    """
+    Convert citation markers in markdown content to HTML superscript format.
+    
+    This function finds citation patterns like 【78:12†source】 and converts them to 
+    HTML superscript tags <sup>12</sup> for better formatting in markdown documents.
+    
+    Args:
+        markdown_content (str): The markdown content containing citation markers
+        
+    Returns:
+        str: The markdown content with citations converted to HTML superscript format"
+    """
+    # Pattern to match 【number:number†source】
+    pattern = r'【\d+:(\d+)†source】'
+    
+    # Replace with <sup>captured_number</sup>
+    def replacement(match):
+        citation_number = match.group(1)
+        return f'<sup>{citation_number}</sup>'
+    
+    return re.sub(pattern, replacement, markdown_content)
+
+
 def fetch_and_print_new_agent_response(
     thread_id: str,
     agents_client: AgentsClient,
     last_message_id: Optional[str] = None,
+    progress_filename: str = "research_progress.txt",
 ) -> Optional[str]:
+    """
+    Fetch the interim agent responses and citations from a thread and write them to a file.
+    
+    Args:
+        thread_id (str): The ID of the thread to fetch messages from
+        agents_client (AgentsClient): The Azure AI agents client instance
+        last_message_id (Optional[str], optional): ID of the last processed message 
+            to avoid duplicates. Defaults to None.
+        progress_filename (str, optional): Name of the file to write progress to. 
+            Defaults to "run_progress.txt".
+            
+    Returns:
+        Optional[str]: The ID of the latest message if new content was found, 
+            otherwise returns the last_message_id
+    """
     response = agents_client.messages.get_last_message_by_role(
         thread_id=thread_id,
         role=MessageRole.AGENT,
@@ -50,41 +90,81 @@ def fetch_and_print_new_agent_response(
     if not response or response.id == last_message_id:
         return last_message_id  # No new content
 
-    print("\nAgent response:")
-    print("\n".join(t.text.value for t in response.text_messages))
+    # if not a "cot_summary" return
+    if not any(t.text.value.startswith("cot_summary:") for t in response.text_messages):
+        return last_message_id    
 
-    for ann in response.url_citation_annotations:
-        print(f"URL Citation: [{ann.url_citation.title}]({ann.url_citation.url})")
+    with open(progress_filename, "a", encoding="utf-8") as fp:
+        fp.write("\nAGENT>\n")
+        fp.write("\n".join(t.text.value.replace("cot_summary:", "Reasoning:") for t in response.text_messages))
+        fp.write("\n")
+
+        for ann in response.url_citation_annotations:
+            fp.write(f"Citation: [{ann.url_citation.title}]({ann.url_citation.url})\n")
 
     return response.id
 
 
+
+
 def create_research_summary(
         message : ThreadMessage,
-        filepath: str
-         
+        filepath: str = "research_report.md"
 ) -> None:
+    """
+    Create a formatted research report from an agent's thread message with numbered citations 
+    and a references section.
+    
+    Args:
+        message (ThreadMessage): The thread message containing the agent's research response
+        filepath (str, optional): Path where the research summary will be saved. 
+            Defaults to "research_report.md".
+            
+    Returns:
+        None: This function doesn't return a value, it writes to a file
+    """
     if not message:
-        print("No message content provided, cannot create research summary.")
+        print("No message content provided, cannot create research report.")
         return
 
     with open(filepath, "w", encoding="utf-8") as fp:
         # Write text summary
         text_summary = "\n\n".join([t.text.value.strip() for t in message.text_messages])
+        # Convert citations to superscript format
+        text_summary = convert_citations_to_superscript(text_summary)
         fp.write(text_summary)
 
-        # Write unique URL citations, if present
+        # Write unique URL citations with numbered bullets, if present
         if message.url_citation_annotations:
-            fp.write("\n\n## References\n")
+            fp.write("\n\n## Citations\n")
             seen_urls = set()
+            citation_dict = {}
+            
             for ann in message.url_citation_annotations:
                 url = ann.url_citation.url
                 title = ann.url_citation.title or url
+                
                 if url not in seen_urls:
-                    fp.write(f"- [{title}]({url})\n")
+                    # Extract citation number from annotation text like "【58:1†...】"
+                    citation_number = None
+                    if ann.text and ":" in ann.text:
+                        match = re.search(r'【\d+:(\d+)', ann.text)
+                        if match:
+                            citation_number = int(match.group(1))
+                    
+                    if citation_number is not None:
+                        citation_dict[citation_number] = f"[{title}]({url})"
+                    else:
+                        # Fallback for citations without proper format
+                        citation_dict[len(citation_dict) + 1] = f"[{title}]({url})"
+                    
                     seen_urls.add(url)
+            
+            # Write citations in numbered order
+            for num in sorted(citation_dict.keys()):
+                fp.write(f"{num}. {citation_dict[num]}\n")
 
-    print(f"Research summary written to '{filepath}'.")
+    print(f"Research report written to '{filepath}'.")
 
 
 
@@ -147,6 +227,7 @@ async def chat_deep_research_agent(request: ChatRequest) -> ChatResponse:
                         thread_id=thread_id,
                         agents_client=agents_client,
                         last_message_id=last_message_id,
+                        progress_filename=f"report/research_progre_{thread_id}_{run.id}.txt",
                     )
                     print(f"Run status: {run.status}")
 
@@ -161,7 +242,7 @@ async def chat_deep_research_agent(request: ChatRequest) -> ChatResponse:
                 )
                 print(final_message)
                 if final_message:
-                    file_path = f"report/research_report_{thread_id}.md"
+                    file_path = f"report/research_report_{thread_id}_{run.id}.md"
                     create_research_summary(final_message, file_path)
                     # Upload the research report to Azure Blob Storage 
                     upload_result = upload_blob_file(container_name= os.environ.get("AZURE_STORAGE_ACCOUNT_CONTAINER_NAME"), file_name = file_path, connection_string= f"DefaultEndpointsProtocol=https;AccountName={os.environ.get('AZURE_STORAGE_ACCOUNT_NAME')};AccountKey={os.environ.get('AZURE_STORAGE_ACCOUNT_KEY')};EndpointSuffix=core.windows.net")
